@@ -1,4 +1,4 @@
-自用 如果你用着挺满意可以给个star吗
+自用 如果你用着还挺满意麻烦可以给个star吗 非常感谢
 
 
 curl食用用方法 #前提得装curl 如果没安装  Ubuntu和Debian 使用 apt install curl -y   centos和rocky 则使用 yum install curl -y
