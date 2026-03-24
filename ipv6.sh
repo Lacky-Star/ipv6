@@ -1,5 +1,4 @@
 #!/bin/bash
-
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[0;33m'
@@ -7,10 +6,7 @@ BLUE='\033[0;34m'
 NC='\033[0m'
 
 check_root() {
-    if [[ $EUID -ne 0 ]]; then
-        echo -e "${RED}请使用 root 权限运行：sudo $0${NC}"
-        exit 1
-    fi
+    [[ $EUID -eq 0 ]] || { echo -e "${RED}请使用 root 权限运行。${NC}"; exit 1; }
 }
 
 backup_file() {
@@ -46,8 +42,8 @@ temp_enable_ipv6() {
 
 permanent_disable_ipv6() {
     echo -e "${YELLOW}永久禁用 IPv6...${NC}"
-    backup_file "/etc/sysctl.conf"
-    backup_file "/etc/sysctl.d/99-ipv6-disable.conf"
+    backup_file /etc/sysctl.conf
+    backup_file /etc/sysctl.d/99-ipv6-disable.conf
     sed -i '/^net.ipv6.conf.*disable_ipv6/d' /etc/sysctl.conf
     rm -f /etc/sysctl.d/99-ipv6-disable.conf
     cat >> /etc/sysctl.conf << EOF
@@ -65,8 +61,8 @@ EOF
 
 permanent_enable_ipv6() {
     echo -e "${YELLOW}永久恢复 IPv6...${NC}"
-    backup_file "/etc/sysctl.conf"
-    backup_file "/etc/sysctl.d/99-ipv6-disable.conf"
+    backup_file /etc/sysctl.conf
+    backup_file /etc/sysctl.d/99-ipv6-disable.conf
     sed -i '/^net.ipv6.conf.*disable_ipv6/d' /etc/sysctl.conf
     rm -f /etc/sysctl.d/99-ipv6-disable.conf
     cat >> /etc/sysctl.conf << EOF
@@ -91,7 +87,6 @@ get_priority_config() {
     fi
 }
 
-# 本地分析（不依赖外网）
 analyze_priority_locally() {
     if ip -6 route show default 2>/dev/null | grep -q default; then
         ipv6_has_route=1
@@ -111,7 +106,6 @@ analyze_priority_locally() {
     [[ $ipv6_has_route -eq 1 ]] && echo "ipv6" || echo "ipv4"
 }
 
-# 外部检测（使用 Cloudflare 端点，容忍重定向）
 check_priority_effective() {
     echo -e "${BLUE}实际检测网络优先级（IPv4/IPv6）：${NC}"
     if ! command -v curl &>/dev/null; then
@@ -123,15 +117,13 @@ check_priority_effective() {
     local ipv4_reachable=0
     local ipv6_reachable=0
 
-    # 测试 IPv4 可达性（Cloudflare DNS，接受 2xx/3xx 状态码）
-    local v4_status=$(curl -4 -s --max-time 3 -o /dev/null -w "%{http_code}" "http://1.1.1.1" 2>/dev/null)
-    if [[ "$v4_status" =~ ^[23] ]]; then
+    # IPv4 测试（HTTPS，跟随重定向，超时 5 秒）
+    if curl -4 -s -L --max-time 5 -o /dev/null -w "%{http_code}" "https://1.1.1.1" 2>/dev/null | grep -qE "2[0-9][0-9]|3[0-9][0-9]"; then
         ipv4_reachable=1
     fi
 
-    # 测试 IPv6 可达性（Cloudflare IPv6 DNS）
-    local v6_status=$(curl -6 -s --max-time 3 -o /dev/null -w "%{http_code}" "http://[2606:4700:4700::1111]" 2>/dev/null)
-    if [[ "$v6_status" =~ ^[23] ]]; then
+    # IPv6 测试（HTTPS，跟随重定向，超时 5 秒）
+    if curl -6 -s -L --max-time 5 -o /dev/null -w "%{http_code}" "https://[2606:4700:4700::1111]" 2>/dev/null | grep -qE "2[0-9][0-9]|3[0-9][0-9]"; then
         ipv6_reachable=1
     fi
 
@@ -140,16 +132,16 @@ check_priority_effective() {
     elif [[ $ipv4_reachable -eq 0 && $ipv6_reachable -eq 1 ]]; then
         echo -e "${GREEN}当前生效：IPv6 优先（仅 IPv6 可达）${NC}"
     elif [[ $ipv4_reachable -eq 1 && $ipv6_reachable -eq 1 ]]; then
-        # 双栈均通，通过访问 /cdn-cgi/trace 获取实际出口 IP
-        local v4_ip=$(curl -4 -s --max-time 3 "http://1.1.1.1/cdn-cgi/trace" 2>/dev/null | grep "ip=" | cut -d= -f2)
-        local v6_ip=$(curl -6 -s --max-time 3 "http://[2606:4700:4700::1111]/cdn-cgi/trace" 2>/dev/null | grep "ip=" | cut -d= -f2)
+        # 双栈均通，通过 /cdn-cgi/trace 获取实际出口 IP
+        local v4_ip=$(curl -4 -s -L --max-time 5 "https://1.1.1.1/cdn-cgi/trace" 2>/dev/null | grep "ip=" | cut -d= -f2)
+        local v6_ip=$(curl -6 -s -L --max-time 5 "https://[2606:4700:4700::1111]/cdn-cgi/trace" 2>/dev/null | grep "ip=" | cut -d= -f2)
         if [[ -n "$v4_ip" && -z "$v6_ip" ]]; then
             echo -e "${GREEN}当前生效：IPv4 优先${NC}"
         elif [[ -z "$v4_ip" && -n "$v6_ip" ]]; then
             echo -e "${GREEN}当前生效：IPv6 优先${NC}"
         else
-            # 使用默认 curl 出口
-            primary_ip=$(curl -s --max-time 3 "http://1.1.1.1/cdn-cgi/trace" 2>/dev/null | grep "ip=" | cut -d= -f2)
+            # 两者均有，取 curl 默认出口（系统优先级）
+            primary_ip=$(curl -s -L --max-time 5 "https://1.1.1.1/cdn-cgi/trace" 2>/dev/null | grep "ip=" | cut -d= -f2)
             if [[ "$primary_ip" =~ ":" ]]; then
                 echo -e "${GREEN}当前生效：IPv6 优先${NC}"
             else
@@ -246,8 +238,7 @@ main_menu() {
         echo -e "${GREEN}[8]${NC} 还原网络优先级为默认"
         echo -e "${GREEN}[9]${NC} 优先级详细状态"
         echo -e "${GREEN}[0]${NC} 退出"
-        echo -n "请选择 [0-9]: "
-        read -r choice
+        read -p "请选择 [0-9]: " choice
         case $choice in
             1) temp_disable_ipv6 ;;
             2) temp_enable_ipv6 ;;
